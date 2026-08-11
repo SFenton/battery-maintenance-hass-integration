@@ -1,0 +1,67 @@
+{
+  "title": "Battery Maintenance",
+  "config": {
+    "abort": {
+      "already_configured": "Battery Maintenance is already configured."
+    },
+    "error": {
+      "at_least_one_entity": "Select at least one battery entity.",
+      "duplicate_physical_device": "More than one selected entity belongs to the same physical device.",
+      "donetick_jwt_required": "DoneTick must use Username & Password (Full Features) authentication.",
+      "entity_in_both_sets": "A battery entity cannot be in both action lists.",
+      "invalid_battery_entity": "Every selection must be an available percentage battery sensor.",
+      "recovery_not_above_low": "The recovery threshold must be higher than the low threshold."
+    },
+    "step": {
+      "user": {
+        "title": "Set up Battery Maintenance",
+        "description": "Choose the battery sensors that should create replace or charge tasks.",
+        "data": {
+          "donetick_entry_id": "DoneTick instance",
+          "replace_entities": "Replace battery entities",
+          "charge_entities": "Charge battery entities",
+          "low_threshold": "Low threshold",
+          "recovery_threshold": "Recovery threshold",
+          "scan_time": "Daily scan time"
+        }
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "at_least_one_entity": "Select at least one battery entity.",
+      "duplicate_physical_device": "More than one selected entity belongs to the same physical device.",
+      "donetick_jwt_required": "DoneTick must use Username & Password (Full Features) authentication.",
+      "entity_in_both_sets": "A battery entity cannot be in both action lists.",
+      "invalid_battery_entity": "Every selection must be an available percentage battery sensor.",
+      "recovery_not_above_low": "The recovery threshold must be higher than the low threshold."
+    },
+    "step": {
+      "init": {
+        "title": "Battery Maintenance options",
+        "description": "Update the mapped battery sensors, thresholds, or daily scan time.",
+        "data": {
+          "donetick_entry_id": "DoneTick instance",
+          "replace_entities": "Replace battery entities",
+          "charge_entities": "Charge battery entities",
+          "low_threshold": "Low threshold",
+          "recovery_threshold": "Recovery threshold",
+          "scan_time": "Daily scan time"
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "sync": {
+        "name": "Sync tasks"
+      }
+    }
+  },
+  "services": {
+    "sync": {
+      "name": "Sync battery maintenance tasks",
+      "description": "Reconcile every configured battery entity with DoneTick now."
+    }
+  }
+}

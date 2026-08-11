@@ -1,0 +1,18 @@
+{
+  "domain": "battery_maintenance",
+  "name": "Battery Maintenance",
+  "after_dependencies": [
+    "donetick"
+  ],
+  "codeowners": [
+    "@SFenton"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/SFenton/battery-maintenance-hass-integration",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/SFenton/battery-maintenance-hass-integration/issues",
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
+

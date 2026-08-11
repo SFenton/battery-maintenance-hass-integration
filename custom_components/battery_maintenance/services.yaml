@@ -1,0 +1,4 @@
+sync:
+  name: Sync battery maintenance tasks
+  description: Reconcile every configured battery entity with DoneTick now.
+
