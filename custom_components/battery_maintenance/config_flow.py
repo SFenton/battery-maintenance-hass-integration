@@ -24,6 +24,7 @@ from .const import (
     CONF_RECOVERY_THRESHOLD,
     CONF_REPLACE_ENTITIES,
     CONF_SCAN_TIME,
+    CONF_UNKNOWN_ENTITIES,
     DEFAULT_LOW_THRESHOLD,
     DEFAULT_RECOVERY_THRESHOLD,
     DEFAULT_SCAN_TIME,
@@ -61,6 +62,10 @@ def _schema(hass: HomeAssistant, defaults: dict[str, Any]) -> vol.Schema:
             vol.Required(
                 CONF_CHARGE_ENTITIES,
                 default=defaults.get(CONF_CHARGE_ENTITIES, []),
+            ): battery_selector,
+            vol.Required(
+                CONF_UNKNOWN_ENTITIES,
+                default=defaults.get(CONF_UNKNOWN_ENTITIES, []),
             ): battery_selector,
             vol.Required(
                 CONF_LOW_THRESHOLD,
@@ -107,10 +112,20 @@ def _validate(
 
     replace_entities = list(user_input.get(CONF_REPLACE_ENTITIES, []))
     charge_entities = list(user_input.get(CONF_CHARGE_ENTITIES, []))
+    unknown_entities = list(user_input.get(CONF_UNKNOWN_ENTITIES, []))
 
-    if not replace_entities and not charge_entities:
+    if not replace_entities and not charge_entities and not unknown_entities:
         return user_input, "at_least_one_entity"
-    if set(replace_entities) & set(charge_entities):
+    selected_sets = [
+        set(replace_entities),
+        set(charge_entities),
+        set(unknown_entities),
+    ]
+    if any(
+        selected_sets[left] & selected_sets[right]
+        for left in range(len(selected_sets))
+        for right in range(left + 1, len(selected_sets))
+    ):
         return user_input, "entity_in_both_sets"
 
     low_threshold = int(user_input[CONF_LOW_THRESHOLD])
@@ -119,7 +134,8 @@ def _validate(
         return user_input, "recovery_not_above_low"
 
     seen_keys: set[str] = set()
-    for entity_id in [*replace_entities, *charge_entities]:
+    actionable_entities = {*replace_entities, *charge_entities}
+    for entity_id in [*replace_entities, *charge_entities, *unknown_entities]:
         state = hass.states.get(entity_id)
         if (
             state is None
@@ -127,16 +143,18 @@ def _validate(
             or state.attributes.get("unit_of_measurement") != "%"
         ):
             return user_input, "invalid_battery_entity"
-        physical_key = battery_entity_metadata(hass, entity_id).physical_key
-        if physical_key in seen_keys:
-            return user_input, "duplicate_physical_device"
-        seen_keys.add(physical_key)
+        if entity_id in actionable_entities:
+            physical_key = battery_entity_metadata(hass, entity_id).physical_key
+            if physical_key in seen_keys:
+                return user_input, "duplicate_physical_device"
+            seen_keys.add(physical_key)
 
     return (
         {
             CONF_DONETICK_ENTRY_ID: donetick_entry_id,
             CONF_REPLACE_ENTITIES: replace_entities,
             CONF_CHARGE_ENTITIES: charge_entities,
+            CONF_UNKNOWN_ENTITIES: unknown_entities,
             CONF_LOW_THRESHOLD: low_threshold,
             CONF_RECOVERY_THRESHOLD: recovery_threshold,
             CONF_SCAN_TIME: str(user_input[CONF_SCAN_TIME]),

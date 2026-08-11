@@ -8,7 +8,7 @@
       "at_least_one_entity": "Select at least one battery entity.",
       "duplicate_physical_device": "More than one selected entity belongs to the same physical device.",
       "donetick_jwt_required": "DoneTick must use Username & Password (Full Features) authentication.",
-      "entity_in_both_sets": "A battery entity cannot be in both action lists.",
+      "entity_in_both_sets": "A battery entity cannot be in more than one list.",
       "invalid_battery_entity": "Every selection must be an available percentage battery sensor.",
       "recovery_not_above_low": "The recovery threshold must be higher than the low threshold."
     },
@@ -20,6 +20,7 @@
           "donetick_entry_id": "DoneTick instance",
           "replace_entities": "Replace battery entities",
           "charge_entities": "Charge battery entities",
+          "unknown_entities": "Unknown battery entities",
           "low_threshold": "Low threshold",
           "recovery_threshold": "Recovery threshold",
           "scan_time": "Daily scan time"
@@ -32,7 +33,7 @@
       "at_least_one_entity": "Select at least one battery entity.",
       "duplicate_physical_device": "More than one selected entity belongs to the same physical device.",
       "donetick_jwt_required": "DoneTick must use Username & Password (Full Features) authentication.",
-      "entity_in_both_sets": "A battery entity cannot be in both action lists.",
+      "entity_in_both_sets": "A battery entity cannot be in more than one list.",
       "invalid_battery_entity": "Every selection must be an available percentage battery sensor.",
       "recovery_not_above_low": "The recovery threshold must be higher than the low threshold."
     },
@@ -44,6 +45,7 @@
           "donetick_entry_id": "DoneTick instance",
           "replace_entities": "Replace battery entities",
           "charge_entities": "Charge battery entities",
+          "unknown_entities": "Unknown battery entities",
           "low_threshold": "Low threshold",
           "recovery_threshold": "Recovery threshold",
           "scan_time": "Daily scan time"

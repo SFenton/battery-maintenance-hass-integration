@@ -38,14 +38,21 @@ The integration has one configuration entry with:
 - the DoneTick instance that owns managed tasks;
 - entities whose batteries should be replaced;
 - entities whose batteries should be charged;
+- entities that are still Unknown or intentionally ignored;
 - the low-battery threshold;
 - the recovery threshold;
 - the daily reconciliation time.
 
-An entity cannot appear in both action lists. Multiple selected entities that
-resolve to the same physical device are also rejected.
+An entity cannot appear in more than one list. Multiple actionable entities
+that resolve to the same physical device are also rejected.
 
 One Battery Maintenance entry manages one full-featured DoneTick entry.
+
+New enabled percentage battery sensors are automatically added to **Unknown**.
+Battery Maintenance creates one DoneTick task assigned to Stephen with
+instructions to move the entity to Replace or Charge, or leave it Unknown to
+ignore it. Completing that task records the review and does not create another
+categorization task for the same entity.
 
 ## Task lifecycle
 

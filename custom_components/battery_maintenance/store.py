@@ -30,6 +30,7 @@ class BatteryMaintenanceStore:
             minor_version=STORE_MINOR_VERSION,
         )
         self.entries: dict[str, dict[str, Any]] = {}
+        self.reviews: dict[str, dict[str, Any]] = {}
 
     async def async_load(self) -> None:
         """Load persisted ledger state."""
@@ -39,12 +40,19 @@ class BatteryMaintenanceStore:
             self.donetick_entry_id,
         ):
             self.entries = {}
+            self.reviews = {}
             await self.async_save()
             return
         entries = data.get("entries", {}) if isinstance(data, dict) else {}
+        reviews = data.get("reviews", {}) if isinstance(data, dict) else {}
         self.entries = {
             str(reference): dict(value)
             for reference, value in entries.items()
+            if isinstance(value, dict)
+        }
+        self.reviews = {
+            str(reference): dict(value)
+            for reference, value in reviews.items()
             if isinstance(value, dict)
         }
 
@@ -54,6 +62,7 @@ class BatteryMaintenanceStore:
             {
                 "donetick_entry_id": self.donetick_entry_id,
                 "entries": self.entries,
+                "reviews": self.reviews,
             }
         )
 
@@ -66,4 +75,5 @@ class BatteryMaintenanceStore:
         return {
             "donetick_entry_id": self.donetick_entry_id,
             "entries": {key: dict(value) for key, value in self.entries.items()},
+            "reviews": {key: dict(value) for key, value in self.reviews.items()},
         }

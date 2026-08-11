@@ -7,6 +7,7 @@ DOMAIN: Final = "battery_maintenance"
 
 CONF_REPLACE_ENTITIES: Final = "replace_entities"
 CONF_CHARGE_ENTITIES: Final = "charge_entities"
+CONF_UNKNOWN_ENTITIES: Final = "unknown_entities"
 CONF_LOW_THRESHOLD: Final = "low_threshold"
 CONF_RECOVERY_THRESHOLD: Final = "recovery_threshold"
 CONF_SCAN_TIME: Final = "scan_time"
@@ -15,6 +16,7 @@ CONF_DONETICK_ENTRY_ID: Final = "donetick_entry_id"
 DEFAULT_LOW_THRESHOLD: Final = 20
 DEFAULT_RECOVERY_THRESHOLD: Final = 40
 DEFAULT_SCAN_TIME: Final = time(8, 0)
+BOOTSTRAP_DELAY_SECONDS: Final = 5 * 60
 
 ACTION_REPLACE: Final = "replace"
 ACTION_CHARGE: Final = "charge"
@@ -29,7 +31,7 @@ DONETICK_AUTH_TYPE_KEY: Final = "auth_type"
 DONETICK_JWT_AUTH_TYPE: Final = "jwt"
 
 STORE_VERSION: Final = 1
-STORE_MINOR_VERSION: Final = 1
+STORE_MINOR_VERSION: Final = 2
 STORE_SAVE_DELAY: Final = 1
 
 TASK_DUE_HOUR: Final = 17
@@ -37,3 +39,5 @@ PENDING_RETRY_SECONDS: Final = 30 * 60
 TASK_REFRESH_DELAY: Final = 1.0
 TASK_REFRESH_TIMEOUT: Final = 15.0
 REFERENCE_PREFIX: Final = "BATT-"
+REVIEW_REFERENCE_PREFIX: Final = "REVIEW-"
+REVIEW_ASSIGNEE_ID: Final = 1

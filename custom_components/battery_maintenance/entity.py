@@ -25,6 +25,15 @@ class BatteryEntityMetadata:
 
 
 @callback
+def battery_entity_key(hass: HomeAssistant, entity_id: str) -> str:
+    """Return stable entity identity for discovery review tasks."""
+    entity_entry = er.async_get(hass).async_get(entity_id)
+    if entity_entry and entity_entry.unique_id:
+        return f"{entity_entry.platform}:{entity_entry.unique_id}"
+    return f"entity_id:{entity_id}"
+
+
+@callback
 def battery_entity_metadata(
     hass: HomeAssistant, entity_id: str
 ) -> BatteryEntityMetadata:

@@ -14,6 +14,7 @@ from custom_components.battery_maintenance.const import (
     CONF_RECOVERY_THRESHOLD,
     CONF_REPLACE_ENTITIES,
     CONF_SCAN_TIME,
+    CONF_UNKNOWN_ENTITIES,
     DOMAIN,
 )
 
@@ -42,6 +43,7 @@ async def test_config_flow_creates_single_entry(hass: HomeAssistant) -> None:
             CONF_DONETICK_ENTRY_ID: donetick_entry.entry_id,
             CONF_REPLACE_ENTITIES: ["sensor.replace_battery"],
             CONF_CHARGE_ENTITIES: ["sensor.charge_battery"],
+            CONF_UNKNOWN_ENTITIES: [],
             CONF_LOW_THRESHOLD: 20,
             CONF_RECOVERY_THRESHOLD: 40,
             CONF_SCAN_TIME: "08:00:00",
@@ -70,6 +72,7 @@ async def test_config_flow_rejects_overlap(hass: HomeAssistant) -> None:
             CONF_DONETICK_ENTRY_ID: donetick_entry.entry_id,
             CONF_REPLACE_ENTITIES: ["sensor.shared_battery"],
             CONF_CHARGE_ENTITIES: ["sensor.shared_battery"],
+            CONF_UNKNOWN_ENTITIES: [],
             CONF_LOW_THRESHOLD: 20,
             CONF_RECOVERY_THRESHOLD: 40,
             CONF_SCAN_TIME: "08:00:00",
@@ -98,6 +101,7 @@ async def test_config_flow_requires_full_donetick_auth(
             CONF_DONETICK_ENTRY_ID: donetick_entry.entry_id,
             CONF_REPLACE_ENTITIES: ["sensor.replace_battery"],
             CONF_CHARGE_ENTITIES: [],
+            CONF_UNKNOWN_ENTITIES: [],
             CONF_LOW_THRESHOLD: 20,
             CONF_RECOVERY_THRESHOLD: 40,
             CONF_SCAN_TIME: "08:00:00",

@@ -19,6 +19,8 @@ from custom_components.battery_maintenance.const import (
     CONF_RECOVERY_THRESHOLD,
     CONF_REPLACE_ENTITIES,
     CONF_SCAN_TIME,
+    CONF_UNKNOWN_ENTITIES,
+    DOMAIN,
 )
 from custom_components.battery_maintenance.coordinator import (
     BatteryMaintenanceCoordinator,
@@ -34,6 +36,7 @@ class FakeEntry:
         CONF_DONETICK_ENTRY_ID: "donetick-entry",
         CONF_REPLACE_ENTITIES: ["sensor.front_yard_battery"],
         CONF_CHARGE_ENTITIES: [],
+        CONF_UNKNOWN_ENTITIES: [],
         CONF_LOW_THRESHOLD: 20,
         CONF_RECOVERY_THRESHOLD: 40,
         CONF_SCAN_TIME: "08:00:00",
@@ -274,3 +277,120 @@ async def test_pending_creation_never_duplicates(
     assert create_calls == 1
     assert next(iter(store.entries.values()))["task_id"] == 100
     assert next(iter(store.entries.values())).get("creation_pending", False) is False
+
+
+async def test_new_battery_is_added_unknown_and_assigned_to_stephen(
+    hass: HomeAssistant,
+    monkeypatch,
+) -> None:
+    """A newly available battery gets one Stephen-owned review task."""
+    monkeypatch.setattr(
+        "custom_components.battery_maintenance.coordinator.TASK_REFRESH_DELAY",
+        0,
+    )
+    donetick_entry = MockConfigEntry(
+        domain="donetick",
+        data={"auth_type": "jwt"},
+        entry_id="donetick-discovery",
+    )
+    donetick_entry.add_to_hass(hass)
+    todo_entity = (
+        er.async_get(hass)
+        .async_get_or_create(
+            "todo",
+            "donetick",
+            "dt_donetick-discovery_all_tasks_internal",
+            config_entry=donetick_entry,
+            original_name="All Tasks Internal",
+            suggested_object_id="all_tasks_internal",
+        )
+        .entity_id
+    )
+    hass.states.async_set(todo_entity, "0")
+    hass.states.async_set(
+        "sensor.known_battery",
+        "80",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "Known Battery",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    hass.states.async_set(
+        "sensor.new_device_battery",
+        "90",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "New Device Battery",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    battery_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={},
+        entry_id="battery-discovery",
+        options={
+            CONF_DONETICK_ENTRY_ID: donetick_entry.entry_id,
+            CONF_REPLACE_ENTITIES: ["sensor.known_battery"],
+            CONF_CHARGE_ENTITIES: [],
+            CONF_UNKNOWN_ENTITIES: [],
+            CONF_LOW_THRESHOLD: 20,
+            CONF_RECOVERY_THRESHOLD: 40,
+            CONF_SCAN_TIME: "08:00:00",
+        },
+    )
+    battery_entry.add_to_hass(hass)
+
+    tasks: dict[int, dict[str, Any]] = {}
+    create_payloads: list[dict[str, Any]] = []
+
+    async def get_items(call: ServiceCall) -> dict[str, Any]:
+        return {
+            todo_entity: {
+                "items": [
+                    {
+                        "description": task["description"],
+                        "status": "needs_action",
+                        "summary": task["name"],
+                        "uid": f"{task_id}--{task.get('due_date')}",
+                    }
+                    for task_id, task in tasks.items()
+                ]
+            }
+        }
+
+    async def create_task(call: ServiceCall) -> None:
+        create_payloads.append(dict(call.data))
+        tasks[200] = dict(call.data)
+
+    async def update_task(call: ServiceCall) -> None:
+        return None
+
+    hass.services.async_register(
+        "todo",
+        "get_items",
+        get_items,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register("donetick", "create_task_form", create_task)
+    hass.services.async_register("donetick", "update_task_form", update_task)
+
+    store = BatteryMaintenanceStore(
+        hass, battery_entry.entry_id, donetick_entry.entry_id
+    )
+    coordinator = BatteryMaintenanceCoordinator(
+        hass,
+        battery_entry,
+        store,
+        donetick_entry.entry_id,
+    )
+    await coordinator.async_initialize()
+
+    summary = await coordinator.async_reconcile("discovery")
+
+    assert summary.discovered == 1
+    assert summary.review_created == 1
+    assert battery_entry.options[CONF_UNKNOWN_ENTITIES] == ["sensor.new_device_battery"]
+    assert len(store.reviews) == 1
+    assert create_payloads[0]["assignees"] == "1"
+    assert create_payloads[0]["name"] == "Categorize battery: New Device Battery"

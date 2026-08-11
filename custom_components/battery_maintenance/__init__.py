@@ -8,7 +8,7 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import Platform
+from homeassistant.const import ATTR_DEVICE_CLASS, PERCENTAGE, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import (
     ConfigEntryNotReady,
@@ -16,14 +16,20 @@ from homeassistant.exceptions import (
     ServiceValidationError,
 )
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_added_domain,
+    async_track_time_change,
+)
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
 from .compat import compatible_donetick_entry, donetick_internal_todo_entity
 from .const import (
+    BOOTSTRAP_DELAY_SECONDS,
     CONF_DONETICK_ENTRY_ID,
     CONF_SCAN_TIME,
+    CONF_UNKNOWN_ENTITIES,
     DEFAULT_SCAN_TIME,
     DOMAIN,
     SERVICE_SYNC,
@@ -83,6 +89,7 @@ async def async_setup_entry(
         donetick_entry_id,
     )
     await coordinator.async_initialize()
+    needs_unknown_bootstrap = CONF_UNKNOWN_ENTITIES not in entry.options
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)
@@ -99,10 +106,34 @@ async def async_setup_entry(
     async def _async_daily(_: Any) -> None:
         await _async_background_reconcile("daily")
 
+    async def _async_bootstrap_unknowns(_: Any) -> None:
+        await coordinator.async_bootstrap_unknowns_if_needed()
+        await _async_background_reconcile("bootstrap")
+
+    async def _async_sensor_added(event: Any) -> None:
+        state = event.data.get("new_state")
+        if (
+            state is not None
+            and state.attributes.get(ATTR_DEVICE_CLASS) == "battery"
+            and state.attributes.get("unit_of_measurement") == PERCENTAGE
+        ):
+            await _async_background_reconcile("discovery")
+
     scan_time = time.fromisoformat(
         str(entry.options.get(CONF_SCAN_TIME, DEFAULT_SCAN_TIME.isoformat()))
     )
     entry.async_on_unload(async_at_started(hass, _async_started))
+    if needs_unknown_bootstrap:
+        entry.async_on_unload(
+            async_call_later(
+                hass,
+                BOOTSTRAP_DELAY_SECONDS,
+                _async_bootstrap_unknowns,
+            )
+        )
+    entry.async_on_unload(
+        async_track_state_added_domain(hass, "sensor", _async_sensor_added)
+    )
     entry.async_on_unload(
         async_track_time_change(
             hass,
