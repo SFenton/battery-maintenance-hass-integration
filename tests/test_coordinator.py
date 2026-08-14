@@ -143,7 +143,7 @@ async def test_reconcile_creates_updates_and_suppresses(
     assert first.created == 1
     assert calls["create"] == 1
     assert len(store.entries) == 1
-    assert tasks[100]["name"] == "Replace Front Yard Battery (13%)"
+    assert tasks[100]["name"] == "Replace Front Yard Battery \u00b7 13%"
 
     second = await coordinator.async_reconcile("test")
     assert second.created == 0
@@ -161,7 +161,7 @@ async def test_reconcile_creates_updates_and_suppresses(
     updated = await coordinator.async_reconcile("test")
     assert updated.updated == 1
     assert calls["update"] == 1
-    assert tasks[100]["name"] == "Replace Front Yard Battery (12%)"
+    assert tasks[100]["name"] == "Replace Front Yard Battery \u00b7 12%"
     assert (
         "due_date" not in tasks[100]
         or tasks[100]["due_date"] == tasks[100]["next_due_date"]
@@ -527,7 +527,7 @@ async def test_recovery_completes_active_task(
 
     created = await coordinator.async_reconcile("low")
     assert created.created == 1
-    assert tasks[300]["name"] == "Replace Front Yard Battery (20%)"
+    assert tasks[300]["name"] == "Replace Front Yard Battery \u00b7 20%"
 
     hass.states.async_set(
         "sensor.front_yard_battery",
@@ -540,7 +540,7 @@ async def test_recovery_completes_active_task(
     )
     updated = await coordinator.async_reconcile("state_change")
     assert updated.updated == 1
-    assert tasks[300]["name"] == "Replace Front Yard Battery (25%)"
+    assert tasks[300]["name"] == "Replace Front Yard Battery \u00b7 25%"
 
     hass.states.async_set(
         "sensor.front_yard_battery",

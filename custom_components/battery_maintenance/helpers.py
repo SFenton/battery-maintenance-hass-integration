@@ -39,7 +39,7 @@ def task_name(action: str, device_name: str, percentage: float) -> str:
     else:
         suffix = "" if device_name.lower().endswith(" battery") else " battery"
         base_name = f"Replace {device_name}{suffix}"
-    return f"{base_name} ({format_percent(percentage)}%)"
+    return f"{base_name} \u00b7 {format_percent(percentage)}%"
 
 
 def task_description(
