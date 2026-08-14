@@ -19,6 +19,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_added_domain,
+    async_track_state_change_event,
     async_track_time_change,
 )
 from homeassistant.helpers.start import async_at_started
@@ -27,7 +28,9 @@ from homeassistant.helpers.typing import ConfigType
 from .compat import compatible_donetick_entry, donetick_internal_todo_entity
 from .const import (
     BOOTSTRAP_DELAY_SECONDS,
+    CONF_CHARGE_ENTITIES,
     CONF_DONETICK_ENTRY_ID,
+    CONF_REPLACE_ENTITIES,
     CONF_SCAN_TIME,
     CONF_UNKNOWN_ENTITIES,
     DEFAULT_SCAN_TIME,
@@ -119,8 +122,23 @@ async def async_setup_entry(
         ):
             await _async_background_reconcile("discovery")
 
+    async def _async_battery_state_changed(event: Any) -> None:
+        old_state = event.data.get("old_state")
+        new_state = event.data.get("new_state")
+        if new_state is None or (
+            old_state is not None and old_state.state == new_state.state
+        ):
+            return
+        await _async_background_reconcile("state_change")
+
     scan_time = time.fromisoformat(
         str(entry.options.get(CONF_SCAN_TIME, DEFAULT_SCAN_TIME.isoformat()))
+    )
+    tracked_entities = sorted(
+        {
+            *entry.options.get(CONF_REPLACE_ENTITIES, []),
+            *entry.options.get(CONF_CHARGE_ENTITIES, []),
+        }
     )
     entry.async_on_unload(async_at_started(hass, _async_started))
     if needs_unknown_bootstrap:
@@ -134,6 +152,14 @@ async def async_setup_entry(
     entry.async_on_unload(
         async_track_state_added_domain(hass, "sensor", _async_sensor_added)
     )
+    if tracked_entities:
+        entry.async_on_unload(
+            async_track_state_change_event(
+                hass,
+                tracked_entities,
+                _async_battery_state_changed,
+            )
+        )
     entry.async_on_unload(
         async_track_time_change(
             hass,

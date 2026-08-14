@@ -32,11 +32,14 @@ def format_percent(value: float) -> str:
     return f"{value:.1f}"
 
 
-def task_name(action: str, device_name: str) -> str:
+def task_name(action: str, device_name: str, percentage: float) -> str:
     """Build the managed DoneTick task name."""
     if action == ACTION_CHARGE:
-        return f"Charge {device_name}"
-    return f"Replace {device_name} battery"
+        base_name = f"Charge {device_name}"
+    else:
+        suffix = "" if device_name.lower().endswith(" battery") else " battery"
+        base_name = f"Replace {device_name}{suffix}"
+    return f"{base_name} ({format_percent(percentage)}%)"
 
 
 def task_description(

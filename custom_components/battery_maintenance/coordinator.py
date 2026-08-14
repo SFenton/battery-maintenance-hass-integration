@@ -29,6 +29,7 @@ from .const import (
     CONF_UNKNOWN_ENTITIES,
     DEFAULT_LOW_THRESHOLD,
     DEFAULT_RECOVERY_THRESHOLD,
+    DONETICK_COMPLETE_SERVICE,
     DONETICK_CREATE_SERVICE,
     DONETICK_DOMAIN,
     DONETICK_UPDATE_SERVICE,
@@ -69,6 +70,7 @@ class ReconcileSummary:
     created: int = 0
     adopted: int = 0
     updated: int = 0
+    completed: int = 0
     suppressed: int = 0
     recovered: int = 0
     unavailable: int = 0
@@ -407,6 +409,7 @@ class BatteryMaintenanceCoordinator:
     def _require_services(self) -> None:
         """Ensure the required DoneTick services are available."""
         required = (
+            (DONETICK_DOMAIN, DONETICK_COMPLETE_SERVICE),
             (DONETICK_DOMAIN, DONETICK_CREATE_SERVICE),
             (DONETICK_DOMAIN, DONETICK_UPDATE_SERVICE),
             ("todo", "get_items"),
@@ -463,7 +466,11 @@ class BatteryMaintenanceCoordinator:
 
         reference = stable_reference(mapping.metadata.physical_key)
         migrated_reference: str | None = None
-        expected_name = task_name(mapping.action, mapping.metadata.device_name)
+        expected_name = task_name(
+            mapping.action,
+            mapping.metadata.device_name,
+            percentage,
+        )
         expected_description = task_description(
             mapping.action,
             mapping.metadata.device_name,
@@ -489,14 +496,14 @@ class BatteryMaintenanceCoordinator:
                     self.store.entries[reference] = ledger
 
         if ledger and ledger.get("creation_pending"):
-            if percentage >= recovery_threshold:
-                self.store.entries.pop(reference, None)
-                summary.recovered += 1
-                return
             pending_task = self._find_reference_candidate(active_tasks, reference)
             if pending_task is None:
                 pending_task = await self._async_wait_for_reference(reference)
             if pending_task is None:
+                if percentage >= recovery_threshold:
+                    self.store.entries.pop(reference, None)
+                    summary.recovered += 1
+                    return
                 pending_since = dt_util.parse_datetime(
                     str(ledger.get("pending_since", ""))
                 )
@@ -556,6 +563,12 @@ class BatteryMaintenanceCoordinator:
                 claimed_task_ids.discard(unowned_task_id)
 
         if task is not None:
+            if percentage >= recovery_threshold:
+                await self._async_complete_task(task_id)
+                self.store.entries.pop(reference, None)
+                summary.completed += 1
+                summary.recovered += 1
+                return
             if (
                 task.get("summary") != expected_name
                 or task.get("description", "") != expected_description
@@ -575,9 +588,6 @@ class BatteryMaintenanceCoordinator:
             )
             return
 
-        if percentage > low_threshold:
-            return
-
         adopted = self._find_adoption_candidate(
             active_tasks,
             reference,
@@ -592,6 +602,12 @@ class BatteryMaintenanceCoordinator:
                     f"DoneTick returned an invalid task identifier for {expected_name}"
                 )
             claimed_task_ids.add(adopted_id)
+            if percentage >= recovery_threshold:
+                await self._async_complete_task(adopted_id)
+                self.store.entries.pop(reference, None)
+                summary.completed += 1
+                summary.recovered += 1
+                return
             if (
                 adopted.get("summary") != expected_name
                 or adopted.get("description", "") != expected_description
@@ -611,6 +627,9 @@ class BatteryMaintenanceCoordinator:
             )
             await self.store.async_save()
             summary.adopted += 1
+            return
+
+        if percentage > low_threshold:
             return
 
         self._record_pending_ledger(
@@ -858,6 +877,18 @@ class BatteryMaintenanceCoordinator:
                 "notification": False,
                 "priority": "high",
                 "recurrence": "no_repeat",
+                "config_entry_id": self.donetick_entry_id,
+            },
+            blocking=True,
+        )
+
+    async def _async_complete_task(self, task_id: int) -> None:
+        """Complete a managed DoneTick task after battery recovery."""
+        await self.hass.services.async_call(
+            DONETICK_DOMAIN,
+            DONETICK_COMPLETE_SERVICE,
+            {
+                "task_id": task_id,
                 "config_entry_id": self.donetick_entry_id,
             },
             blocking=True,

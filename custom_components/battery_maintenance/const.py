@@ -24,6 +24,7 @@ ACTION_CHARGE: Final = "charge"
 SERVICE_SYNC: Final = "sync"
 
 DONETICK_DOMAIN: Final = "donetick"
+DONETICK_COMPLETE_SERVICE: Final = "complete_task"
 DONETICK_CREATE_SERVICE: Final = "create_task_form"
 DONETICK_UPDATE_SERVICE: Final = "update_task_form"
 DONETICK_ALL_TASKS_ENTITY: Final = "todo.all_tasks_internal"

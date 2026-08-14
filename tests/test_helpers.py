@@ -23,8 +23,11 @@ def test_task_copy_and_reference_are_stable() -> None:
 
     assert reference == stable_reference("mac:446755525e61")
     assert reference.startswith("BATT-")
-    assert task_name(ACTION_REPLACE, "Front Yard") == "Replace Front Yard battery"
-    assert task_name(ACTION_CHARGE, "Smart Lock") == "Charge Smart Lock"
+    assert (
+        task_name(ACTION_REPLACE, "Front Yard", 13)
+        == "Replace Front Yard battery (13%)"
+    )
+    assert task_name(ACTION_CHARGE, "Smart Lock", 19.5) == "Charge Smart Lock (19.5%)"
     assert "13%" in task_description(
         ACTION_REPLACE,
         "Front Yard",

@@ -21,6 +21,7 @@ from custom_components.battery_maintenance.const import (
     CONF_SCAN_TIME,
     CONF_UNKNOWN_ENTITIES,
     DOMAIN,
+    DONETICK_COMPLETE_SERVICE,
 )
 from custom_components.battery_maintenance.coordinator import (
     BatteryMaintenanceCoordinator,
@@ -113,6 +114,9 @@ async def test_reconcile_creates_updates_and_suppresses(
         calls["update"] += 1
         tasks[int(call.data["task_id"])].update(call.data)
 
+    async def complete_task(call: ServiceCall) -> None:
+        tasks[int(call.data["task_id"])]["is_active"] = False
+
     hass.services.async_register(
         "todo",
         "get_items",
@@ -121,6 +125,11 @@ async def test_reconcile_creates_updates_and_suppresses(
     )
     hass.services.async_register("donetick", "create_task_form", create_task)
     hass.services.async_register("donetick", "update_task_form", update_task)
+    hass.services.async_register(
+        "donetick",
+        DONETICK_COMPLETE_SERVICE,
+        complete_task,
+    )
     store = BatteryMaintenanceStore(hass, FakeEntry.entry_id, donetick_entry.entry_id)
     coordinator = BatteryMaintenanceCoordinator(
         hass,
@@ -134,6 +143,7 @@ async def test_reconcile_creates_updates_and_suppresses(
     assert first.created == 1
     assert calls["create"] == 1
     assert len(store.entries) == 1
+    assert tasks[100]["name"] == "Replace Front Yard Battery (13%)"
 
     second = await coordinator.async_reconcile("test")
     assert second.created == 0
@@ -151,6 +161,7 @@ async def test_reconcile_creates_updates_and_suppresses(
     updated = await coordinator.async_reconcile("test")
     assert updated.updated == 1
     assert calls["update"] == 1
+    assert tasks[100]["name"] == "Replace Front Yard Battery (12%)"
     assert (
         "due_date" not in tasks[100]
         or tasks[100]["due_date"] == tasks[100]["next_due_date"]
@@ -242,6 +253,9 @@ async def test_pending_creation_never_duplicates(
     async def update_task(call: ServiceCall) -> None:
         return None
 
+    async def complete_task(call: ServiceCall) -> None:
+        return None
+
     hass.services.async_register(
         "todo",
         "get_items",
@@ -250,6 +264,11 @@ async def test_pending_creation_never_duplicates(
     )
     hass.services.async_register("donetick", "create_task_form", create_task)
     hass.services.async_register("donetick", "update_task_form", update_task)
+    hass.services.async_register(
+        "donetick",
+        DONETICK_COMPLETE_SERVICE,
+        complete_task,
+    )
 
     entry = FakeEntry()
     entry.entry_id = "pending-entry"
@@ -366,6 +385,9 @@ async def test_new_battery_is_added_unknown_and_assigned_to_stephen(
     async def update_task(call: ServiceCall) -> None:
         return None
 
+    async def complete_task(call: ServiceCall) -> None:
+        return None
+
     hass.services.async_register(
         "todo",
         "get_items",
@@ -374,6 +396,11 @@ async def test_new_battery_is_added_unknown_and_assigned_to_stephen(
     )
     hass.services.async_register("donetick", "create_task_form", create_task)
     hass.services.async_register("donetick", "update_task_form", update_task)
+    hass.services.async_register(
+        "donetick",
+        DONETICK_COMPLETE_SERVICE,
+        complete_task,
+    )
 
     store = BatteryMaintenanceStore(
         hass, battery_entry.entry_id, donetick_entry.entry_id
@@ -394,3 +421,140 @@ async def test_new_battery_is_added_unknown_and_assigned_to_stephen(
     assert len(store.reviews) == 1
     assert create_payloads[0]["assignees"] == "1"
     assert create_payloads[0]["name"] == "Categorize battery: New Device Battery"
+
+
+async def test_recovery_completes_active_task(
+    hass: HomeAssistant,
+    monkeypatch,
+) -> None:
+    """A recovered battery immediately completes its active managed task."""
+    monkeypatch.setattr(
+        "custom_components.battery_maintenance.coordinator.TASK_REFRESH_DELAY",
+        0,
+    )
+    donetick_entry = MockConfigEntry(
+        domain="donetick",
+        data={"auth_type": "jwt"},
+        entry_id="donetick-recovery",
+    )
+    donetick_entry.add_to_hass(hass)
+    todo_entity = (
+        er.async_get(hass)
+        .async_get_or_create(
+            "todo",
+            "donetick",
+            "dt_donetick-recovery_all_tasks_internal",
+            config_entry=donetick_entry,
+            original_name="All Tasks Internal",
+            suggested_object_id="all_tasks_internal",
+        )
+        .entity_id
+    )
+    hass.states.async_set(todo_entity, "0")
+    hass.states.async_set(
+        "sensor.front_yard_battery",
+        "20",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "Front Yard Battery",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+
+    tasks: dict[int, dict[str, Any]] = {}
+    complete_calls = 0
+
+    async def get_items(call: ServiceCall) -> dict[str, Any]:
+        return {
+            todo_entity: {
+                "items": [
+                    {
+                        "description": task["description"],
+                        "status": "needs_action",
+                        "summary": task["name"],
+                        "uid": f"{task_id}--{task.get('next_due_date')}",
+                    }
+                    for task_id, task in tasks.items()
+                    if task["is_active"]
+                ]
+            }
+        }
+
+    async def create_task(call: ServiceCall) -> None:
+        tasks[300] = {
+            **call.data,
+            "id": 300,
+            "is_active": True,
+            "next_due_date": call.data["due_date"],
+        }
+
+    async def update_task(call: ServiceCall) -> None:
+        tasks[int(call.data["task_id"])].update(call.data)
+
+    async def complete_task(call: ServiceCall) -> None:
+        nonlocal complete_calls
+        complete_calls += 1
+        tasks[int(call.data["task_id"])]["is_active"] = False
+
+    hass.services.async_register(
+        "todo",
+        "get_items",
+        get_items,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register("donetick", "create_task_form", create_task)
+    hass.services.async_register("donetick", "update_task_form", update_task)
+    hass.services.async_register(
+        "donetick",
+        DONETICK_COMPLETE_SERVICE,
+        complete_task,
+    )
+
+    entry = FakeEntry()
+    entry.entry_id = "recovery-entry"
+    entry.options = {
+        **FakeEntry.options,
+        CONF_DONETICK_ENTRY_ID: donetick_entry.entry_id,
+    }
+    store = BatteryMaintenanceStore(hass, entry.entry_id, donetick_entry.entry_id)
+    coordinator = BatteryMaintenanceCoordinator(
+        hass,
+        entry,
+        store,
+        donetick_entry.entry_id,
+    )
+    await coordinator.async_initialize()
+
+    created = await coordinator.async_reconcile("low")
+    assert created.created == 1
+    assert tasks[300]["name"] == "Replace Front Yard Battery (20%)"
+
+    hass.states.async_set(
+        "sensor.front_yard_battery",
+        "25",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "Front Yard Battery",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    updated = await coordinator.async_reconcile("state_change")
+    assert updated.updated == 1
+    assert tasks[300]["name"] == "Replace Front Yard Battery (25%)"
+
+    hass.states.async_set(
+        "sensor.front_yard_battery",
+        "40",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "Front Yard Battery",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    recovered = await coordinator.async_reconcile("state_change")
+
+    assert recovered.completed == 1
+    assert recovered.recovered == 1
+    assert complete_calls == 1
+    assert tasks[300]["is_active"] is False
+    assert store.entries == {}

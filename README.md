@@ -7,9 +7,9 @@ battery-percentage entities to one of two household actions:
 - **Charge battery**
 
 It creates or updates one unassigned DoneTick task per physical device, keeps
-the latest percentage in the task description, preserves the original due
-date, and suppresses repeat tasks after completion until the battery reports a
-healthy percentage.
+the latest percentage in the task title and description, preserves the
+original due date, and completes the task when the battery reports a healthy
+percentage.
 
 ## Requirements
 
@@ -41,7 +41,7 @@ The integration has one configuration entry with:
 - entities that are still Unknown or intentionally ignored;
 - the low-battery threshold;
 - the recovery threshold;
-- the daily reconciliation time.
+- the daily fallback reconciliation time.
 
 An entity cannot appear in more than one list. Multiple actionable entities
 that resolve to the same physical device are also rejected.
@@ -58,17 +58,15 @@ categorization task for the same entity.
 
 1. A numeric mapped battery at or below the low threshold opens one DoneTick
    task due at 5:00 PM on the detection date.
-2. Later reconciliations update the title and percentage without moving the
-   deadline or changing assignment.
-3. Completing or deleting the DoneTick task suppresses another task while the
-   same low-battery episode remains active.
-4. After the task is completed or deleted, the episode remains suppressed until
-   the battery reports at or above the recovery threshold. A later low reading
-   may then create a new task.
-5. Unknown and unavailable readings never create or clear an episode.
-
-Battery Maintenance never automatically completes or deletes an active
-DoneTick task.
+2. Every mapped battery state change triggers immediate reconciliation.
+3. While the task remains active, its title and description update to the
+   latest percentage without moving the deadline or changing assignment.
+4. At or above the recovery threshold, Battery Maintenance completes the active
+   DoneTick task and clears the episode.
+5. Manually completing or deleting the task suppresses another task until the
+   battery reaches the recovery threshold. A later low reading may then create
+   a new task.
+6. Unknown and unavailable readings never create or clear an episode.
 
 ## Manual reconciliation
 
