@@ -25,11 +25,15 @@ def test_task_copy_and_reference_are_stable() -> None:
     assert reference.startswith("BATT-")
     assert (
         task_name(ACTION_REPLACE, "Front Yard", 13)
-        == "Replace Front Yard battery \u00b7 13%"
+        == "Replace Front Yard Battery \u00b7 13%"
     )
     assert (
         task_name(ACTION_CHARGE, "Smart Lock", 19.5)
         == "Charge Smart Lock \u00b7 19.5%"
+    )
+    assert (
+        task_name(ACTION_REPLACE, "Theater vent batteries", 8)
+        == "Replace Theater vent Batteries \u00b7 8%"
     )
     assert "13%" in task_description(
         ACTION_REPLACE,

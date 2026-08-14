@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from hashlib import sha256
 
@@ -34,11 +35,21 @@ def format_percent(value: float) -> str:
 
 def task_name(action: str, device_name: str, percentage: float) -> str:
     """Build the managed DoneTick task name."""
+    title_device_name = re.sub(
+        r"\bbatter(?:y|ies)\b",
+        lambda match: match.group(0).capitalize(),
+        device_name,
+        flags=re.IGNORECASE,
+    )
     if action == ACTION_CHARGE:
-        base_name = f"Charge {device_name}"
+        base_name = f"Charge {title_device_name}"
     else:
-        suffix = "" if device_name.lower().endswith(" battery") else " battery"
-        base_name = f"Replace {device_name}{suffix}"
+        suffix = (
+            ""
+            if title_device_name.lower().endswith((" battery", " batteries"))
+            else " Battery"
+        )
+        base_name = f"Replace {title_device_name}{suffix}"
     return f"{base_name} \u00b7 {format_percent(percentage)}%"
 
 
