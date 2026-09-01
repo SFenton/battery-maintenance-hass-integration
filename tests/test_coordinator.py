@@ -25,6 +25,16 @@ from custom_components.battery_maintenance.const import (
 )
 from custom_components.battery_maintenance.coordinator import (
     BatteryMaintenanceCoordinator,
+    ReconcileSummary,
+)
+from custom_components.battery_maintenance.entity import (
+    BatteryEntityMetadata,
+    battery_entity_identity_digest,
+    battery_entity_key,
+)
+from custom_components.battery_maintenance.helpers import (
+    review_reference_marker,
+    stable_review_reference,
 )
 from custom_components.battery_maintenance.store import BatteryMaintenanceStore
 
@@ -419,8 +429,505 @@ async def test_new_battery_is_added_unknown_and_assigned_to_stephen(
     assert summary.review_created == 1
     assert battery_entry.options[CONF_UNKNOWN_ENTITIES] == ["sensor.new_device_battery"]
     assert len(store.reviews) == 1
+    assert next(iter(store.reviews.values()))["display_title"] == "New Device Battery"
     assert create_payloads[0]["assignees"] == "1"
-    assert create_payloads[0]["name"] == "Categorize battery: New Device Battery"
+    assert create_payloads[0]["name"] == "New Device Battery"
+
+
+async def test_review_uses_device_title_and_preserves_it_during_degradation(
+    hass: HomeAssistant,
+    monkeypatch,
+) -> None:
+    """Review reconciliation renames in place without losing a useful title."""
+    entity_id = "sensor.fordpass_vehicle_battery"
+    hass.states.async_set(
+        entity_id,
+        "66",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "Battery (12V)",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    reference = stable_review_reference(battery_entity_key(hass, entity_id))
+    resolved_title = {"value": "Mustang Mach-E Battery (12V)"}
+
+    def metadata(_hass: HomeAssistant, requested_entity_id: str):
+        return BatteryEntityMetadata(
+            entity_id=requested_entity_id,
+            physical_key="device_id:mustang",
+            device_name="Mustang Mach-E",
+            entity_display_name=resolved_title["value"],
+            area_name="Garage",
+        )
+
+    monkeypatch.setattr(
+        "custom_components.battery_maintenance.coordinator.battery_entity_metadata",
+        metadata,
+    )
+
+    task = {
+        "description": (
+            "Home Assistant discovered a new battery entity: Battery (12V)."
+            f"\n\nBattery review reference: {reference}."
+        ),
+        "status": "needs_action",
+        "summary": "Categorize battery: Battery (12V)",
+        "uid": "536--2026-08-28 00:00:00+00:00",
+    }
+    update_payloads: list[dict[str, Any]] = []
+
+    async def update_task(call: ServiceCall) -> None:
+        payload = dict(call.data)
+        update_payloads.append(payload)
+        task["summary"] = payload["name"]
+        task["description"] = payload["description"]
+
+    hass.services.async_register("donetick", "update_task_form", update_task)
+
+    entry = FakeEntry()
+    entry.options = {
+        **FakeEntry.options,
+        CONF_REPLACE_ENTITIES: [],
+        CONF_UNKNOWN_ENTITIES: [entity_id],
+    }
+    store = BatteryMaintenanceStore(hass, entry.entry_id, "donetick-entry")
+    review = {
+        "creation_pending": False,
+        "entity_id": entity_id,
+        "task_id": 536,
+    }
+    store.reviews[reference] = review
+    coordinator = BatteryMaintenanceCoordinator(
+        hass,
+        entry,
+        store,
+        "donetick-entry",
+    )
+
+    first_summary = ReconcileSummary(reason="test")
+    await coordinator._async_reconcile_review(
+        reference,
+        review,
+        [task],
+        {536: task},
+        set(),
+        first_summary,
+    )
+
+    assert first_summary.review_updated == 1
+    assert review["display_title"] == "Mustang Mach-E Battery (12V)"
+    assert update_payloads[0]["name"] == "Mustang Mach-E Battery (12V)"
+    assert "due_date" not in update_payloads[0]
+
+    resolved_title["value"] = entity_id
+    second_summary = ReconcileSummary(reason="test")
+    await coordinator._async_reconcile_review(
+        reference,
+        review,
+        [task],
+        {536: task},
+        set(),
+        second_summary,
+    )
+
+    assert second_summary.review_updated == 0
+    assert len(update_payloads) == 1
+
+
+async def test_review_without_specific_title_does_not_create_raw_id_task(
+    hass: HomeAssistant,
+) -> None:
+    """An unresolved entity stays diagnostic-only instead of creating noise."""
+    entity_id = "sensor.unknown_battery"
+    hass.states.async_set(
+        entity_id,
+        "90",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "Battery",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    entry = FakeEntry()
+    entry.options = {
+        **FakeEntry.options,
+        CONF_REPLACE_ENTITIES: [],
+        CONF_UNKNOWN_ENTITIES: [entity_id],
+    }
+    review = {
+        "creation_pending": False,
+        "entity_id": entity_id,
+        "task_id": 0,
+    }
+    store = BatteryMaintenanceStore(hass, entry.entry_id, "donetick-entry")
+    coordinator = BatteryMaintenanceCoordinator(
+        hass,
+        entry,
+        store,
+        "donetick-entry",
+    )
+    summary = ReconcileSummary(reason="test")
+
+    await coordinator._async_reconcile_review(
+        "REVIEW-UNRESOLVED",
+        review,
+        [],
+        {},
+        set(),
+        summary,
+    )
+
+    assert review["creation_pending"] is False
+    assert "retired_at" not in review
+    assert summary.review_created == 0
+    assert summary.review_unresolved == 1
+
+
+async def test_review_rebinds_renamed_entity_and_retires_mapped_task(
+    hass: HomeAssistant,
+) -> None:
+    """A stable review identity follows an entity rename and closes stale work."""
+    source_entry = MockConfigEntry(
+        domain="mqtt",
+        data={},
+        entry_id="mqtt-battery-entry",
+    )
+    source_entry.add_to_hass(hass)
+    entity_entry = er.async_get(hass).async_get_or_create(
+        "sensor",
+        "mqtt",
+        "renamed_battery",
+        config_entry=source_entry,
+        original_name="Battery",
+        suggested_object_id="master_bedroom_bed_presence_sensor_battery",
+    )
+    hass.states.async_set(
+        entity_entry.entity_id,
+        "100",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "Master Bedroom Bed Presence Sensor Battery",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    reference = stable_review_reference(
+        battery_entity_key(hass, entity_entry.entity_id)
+    )
+    marker = review_reference_marker(reference)
+    task = {
+        "description": f"Old review instructions.\n\n{marker}",
+        "status": "needs_action",
+        "summary": "sensor.old_battery",
+        "uid": "539--2026-08-31 00:00:00+00:00",
+    }
+    completed_task_ids: list[int] = []
+
+    async def complete_task(call: ServiceCall) -> None:
+        completed_task_ids.append(int(call.data["task_id"]))
+
+    hass.services.async_register(
+        "donetick",
+        DONETICK_COMPLETE_SERVICE,
+        complete_task,
+    )
+    entry = FakeEntry()
+    entry.options = {
+        **FakeEntry.options,
+        CONF_REPLACE_ENTITIES: [entity_entry.entity_id],
+    }
+    review = {
+        "creation_pending": False,
+        "entity_id": "sensor.old_battery",
+        "entity_identity_digest": battery_entity_identity_digest(
+            hass,
+            entity_entry.entity_id,
+        ),
+        "task_id": 539,
+    }
+    store = BatteryMaintenanceStore(hass, entry.entry_id, "donetick-entry")
+    store.reviews[reference] = review
+    coordinator = BatteryMaintenanceCoordinator(
+        hass,
+        entry,
+        store,
+        "donetick-entry",
+    )
+    summary = ReconcileSummary(reason="test")
+
+    await coordinator._async_reconcile_review(
+        reference,
+        review,
+        [],
+        {539: task},
+        set(),
+        summary,
+    )
+
+    assert review["entity_id"] == entity_entry.entity_id
+    assert len(str(review["entity_identity_digest"])) == 64
+    assert review["retired_reason"] == "categorized"
+    assert review["retired_at"]
+    assert completed_task_ids == [539]
+    assert summary.review_retired == 1
+
+    await coordinator._async_reconcile_review(
+        reference,
+        review,
+        [task],
+        {539: task},
+        set(),
+        summary,
+    )
+
+    assert completed_task_ids == [539]
+    assert summary.review_retired == 1
+
+
+async def test_registry_only_review_waits_for_state_before_retiring(
+    hass: HomeAssistant,
+) -> None:
+    """A sensor registry entry is not retired while its state is still loading."""
+    source_entry = MockConfigEntry(
+        domain="mqtt",
+        data={},
+        entry_id="mqtt-loading-entry",
+    )
+    source_entry.add_to_hass(hass)
+    entity_entry = er.async_get(hass).async_get_or_create(
+        "sensor",
+        "mqtt",
+        "loading_battery",
+        config_entry=source_entry,
+        original_name="Battery",
+        suggested_object_id="loading_battery",
+    )
+    reference = stable_review_reference(
+        battery_entity_key(hass, entity_entry.entity_id)
+    )
+    review = {
+        "creation_pending": False,
+        "entity_id": entity_entry.entity_id,
+        "task_id": 0,
+    }
+    entry = FakeEntry()
+    entry.options = {
+        **FakeEntry.options,
+        CONF_REPLACE_ENTITIES: [],
+    }
+    store = BatteryMaintenanceStore(hass, entry.entry_id, "donetick-entry")
+    coordinator = BatteryMaintenanceCoordinator(
+        hass,
+        entry,
+        store,
+        "donetick-entry",
+    )
+    summary = ReconcileSummary(reason="test")
+
+    await coordinator._async_reconcile_review(
+        reference,
+        review,
+        [],
+        {},
+        set(),
+        summary,
+    )
+
+    assert "retired_at" not in review
+    assert summary.review_retired == 0
+    assert summary.review_unresolved == 1
+
+
+async def test_review_retires_ineligible_entity_task(
+    hass: HomeAssistant,
+) -> None:
+    """A review that can no longer be configured does not remain actionable."""
+    entity_id = "sensor.vehicle_12v_battery"
+    reference = "REVIEW-33BB580E"
+    marker = review_reference_marker(reference)
+    hass.states.async_set(
+        entity_id,
+        "86",
+        {
+            "friendly_name": "Battery (12V)",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    task = {
+        "description": f"Old review instructions.\n\n{marker}",
+        "status": "needs_action",
+        "summary": "Battery (12V)",
+        "uid": "536--2026-08-28 00:00:00+00:00",
+    }
+    completed_task_ids: list[int] = []
+
+    async def complete_task(call: ServiceCall) -> None:
+        completed_task_ids.append(int(call.data["task_id"]))
+
+    hass.services.async_register(
+        "donetick",
+        DONETICK_COMPLETE_SERVICE,
+        complete_task,
+    )
+    entry = FakeEntry()
+    entry.options = {
+        **FakeEntry.options,
+        CONF_REPLACE_ENTITIES: [],
+    }
+    review = {
+        "creation_pending": False,
+        "display_title": "Mustang Mach-E Battery (12V)",
+        "entity_id": entity_id,
+        "task_id": 536,
+    }
+    store = BatteryMaintenanceStore(hass, entry.entry_id, "donetick-entry")
+    coordinator = BatteryMaintenanceCoordinator(
+        hass,
+        entry,
+        store,
+        "donetick-entry",
+    )
+    summary = ReconcileSummary(reason="test")
+
+    await coordinator._async_reconcile_review(
+        reference,
+        review,
+        [task],
+        {536: task},
+        set(),
+        summary,
+    )
+
+    assert review["retired_reason"] == "ineligible"
+    assert completed_task_ids == [536]
+    assert summary.review_retired == 1
+
+
+async def test_review_retirement_never_completes_task_without_marker(
+    hass: HomeAssistant,
+) -> None:
+    """A stale task pointer cannot complete a task the integration does not own."""
+    entity_id = "sensor.ineligible_battery"
+    reference = "REVIEW-NOT-OWNED"
+    task = {
+        "description": "User-owned task without a battery review marker.",
+        "status": "needs_action",
+        "summary": "Unrelated task",
+        "uid": "700--2026-08-31 00:00:00+00:00",
+    }
+    completed_task_ids: list[int] = []
+
+    async def complete_task(call: ServiceCall) -> None:
+        completed_task_ids.append(int(call.data["task_id"]))
+
+    hass.services.async_register(
+        "donetick",
+        DONETICK_COMPLETE_SERVICE,
+        complete_task,
+    )
+    entry = FakeEntry()
+    entry.options = {
+        **FakeEntry.options,
+        CONF_REPLACE_ENTITIES: [],
+    }
+    review = {
+        "creation_pending": False,
+        "display_title": "Ineligible Battery",
+        "entity_id": entity_id,
+        "task_id": 700,
+    }
+    store = BatteryMaintenanceStore(hass, entry.entry_id, "donetick-entry")
+    coordinator = BatteryMaintenanceCoordinator(
+        hass,
+        entry,
+        store,
+        "donetick-entry",
+    )
+    summary = ReconcileSummary(reason="test")
+
+    await coordinator._async_reconcile_review(
+        reference,
+        review,
+        [task],
+        {700: task},
+        set(),
+        summary,
+    )
+
+    assert completed_task_ids == []
+    assert review["retired_reason"] == "ineligible"
+    assert summary.review_retired == 1
+
+
+async def test_duplicate_review_markers_block_retirement_without_reconcile_error(
+    hass: HomeAssistant,
+    caplog,
+) -> None:
+    """Ambiguous task ownership is logged without blocking mapped batteries."""
+    entity_id = "sensor.mapped_battery"
+    reference = "REVIEW-DUPLICATE"
+    marker = review_reference_marker(reference)
+    hass.states.async_set(
+        entity_id,
+        "90",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "Mapped Battery",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    tasks = [
+        {
+            "description": marker,
+            "status": "needs_action",
+            "summary": "Mapped Battery",
+            "uid": f"{task_id}--2026-08-31 00:00:00+00:00",
+        }
+        for task_id in (600, 601)
+    ]
+    completed_task_ids: list[int] = []
+
+    async def complete_task(call: ServiceCall) -> None:
+        completed_task_ids.append(int(call.data["task_id"]))
+
+    hass.services.async_register(
+        "donetick",
+        DONETICK_COMPLETE_SERVICE,
+        complete_task,
+    )
+    entry = FakeEntry()
+    entry.options = {
+        **FakeEntry.options,
+        CONF_REPLACE_ENTITIES: [entity_id],
+    }
+    review = {
+        "creation_pending": False,
+        "display_title": "Mapped Battery",
+        "entity_id": entity_id,
+        "task_id": 600,
+    }
+    store = BatteryMaintenanceStore(hass, entry.entry_id, "donetick-entry")
+    coordinator = BatteryMaintenanceCoordinator(
+        hass,
+        entry,
+        store,
+        "donetick-entry",
+    )
+    summary = ReconcileSummary(reason="test")
+
+    await coordinator._async_reconcile_review(
+        reference,
+        review,
+        tasks,
+        {600: tasks[0], 601: tasks[1]},
+        set(),
+        summary,
+    )
+
+    assert "retired_at" not in review
+    assert completed_task_ids == []
+    assert summary.review_retired == 0
+    assert "cannot retire safely" in caplog.text
 
 
 async def test_recovery_completes_active_task(

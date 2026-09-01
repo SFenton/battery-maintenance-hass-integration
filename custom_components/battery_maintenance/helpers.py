@@ -44,11 +44,12 @@ def task_name(action: str, device_name: str, percentage: float) -> str:
     if action == ACTION_CHARGE:
         base_name = f"Charge {title_device_name}"
     else:
-        suffix = (
-            ""
-            if title_device_name.lower().endswith((" battery", " batteries"))
-            else " Battery"
+        has_battery_suffix = re.search(
+            r"\bbatter(?:y|ies)\b(?:\s*\([^)]*\))?$",
+            title_device_name,
+            flags=re.IGNORECASE,
         )
+        suffix = "" if has_battery_suffix else " Battery"
         base_name = f"Replace {title_device_name}{suffix}"
     return f"{base_name} \u00b7 {format_percent(percentage)}%"
 
@@ -98,8 +99,8 @@ def review_reference_marker(reference: str) -> str:
 
 
 def review_task_name(entity_name: str) -> str:
-    """Build the categorization task title."""
-    return f"Categorize battery: {entity_name}"
+    """Use the resolved battery name as the categorization task title."""
+    return entity_name
 
 
 def review_task_description(

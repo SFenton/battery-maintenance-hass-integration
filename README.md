@@ -51,8 +51,23 @@ One Battery Maintenance entry manages one full-featured DoneTick entry.
 New enabled percentage battery sensors are automatically added to **Unknown**.
 Battery Maintenance creates one DoneTick task assigned to Stephen with
 instructions to move the entity to Replace or Charge, or leave it Unknown to
-ignore it. Completing that task records the review and does not create another
-categorization task for the same entity.
+ignore it. Unknown is the intentional Ignore bucket. Completing that task
+records the review and does not create another categorization task for the
+same entity.
+
+Review task names preserve explicit entity names and otherwise include Home
+Assistant's device name, such as `Mustang Mach-E Battery (12V)`. If no useful
+device or entity name is available, Battery Maintenance waits instead of
+creating an opaque raw-ID task. Renamed entities are recovered through their
+stable integration identity. Reviews are automatically retired when their
+entity has already been categorized or can no longer be configured; any
+matching integration-owned DoneTick task is completed and the retained review
+record prevents rediscovery. Categorization instructions remain in the task
+description.
+
+Managed task titles use the Home Assistant device name. Keep those names
+household-facing and functional, such as `Front Yard Faucet` rather than only
+`Front Yard`, so task and notification surfaces identify the device clearly.
 
 ## Task lifecycle
 
