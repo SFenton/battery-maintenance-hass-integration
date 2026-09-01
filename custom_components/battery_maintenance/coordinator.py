@@ -14,8 +14,9 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .compat import donetick_internal_todo_entity
@@ -40,6 +41,8 @@ from .const import (
 )
 from .entity import (
     BatteryEntityMetadata,
+    battery_entity_id_for_review_reference,
+    battery_entity_identity_digest,
     battery_entity_key,
     battery_entity_metadata,
 )
@@ -76,6 +79,8 @@ class ReconcileSummary:
     unavailable: int = 0
     discovered: int = 0
     review_created: int = 0
+    review_retired: int = 0
+    review_unresolved: int = 0
     review_updated: int = 0
     errors: int = 0
 
@@ -253,14 +258,22 @@ class BatteryMaintenanceCoordinator:
             reference = stable_review_reference(
                 battery_entity_key(self.hass, entity_id)
             )
+            metadata = battery_entity_metadata(self.hass, entity_id)
+            review = {
+                "creation_pending": False,
+                "entity_id": entity_id,
+                "entity_identity_digest": battery_entity_identity_digest(
+                    self.hass,
+                    entity_id,
+                ),
+                "first_detected": dt_util.now().isoformat(),
+                "task_id": 0,
+            }
+            if metadata.entity_display_name != entity_id:
+                review["display_title"] = metadata.entity_display_name
             self.store.reviews.setdefault(
                 reference,
-                {
-                    "creation_pending": False,
-                    "entity_id": entity_id,
-                    "first_detected": dt_util.now().isoformat(),
-                    "task_id": 0,
-                },
+                review,
             )
         await self.store.async_save()
         return discovered
@@ -275,9 +288,65 @@ class BatteryMaintenanceCoordinator:
         summary: ReconcileSummary,
     ) -> None:
         """Create or maintain one battery categorization task."""
+        if review.get("retired_at"):
+            return
+
         entity_id = str(review.get("entity_id", ""))
-        state = self.hass.states.get(entity_id)
-        entity_name = state.name if state else entity_id
+        stored_identity_digest = str(review.get("entity_identity_digest", "")).strip()
+        entity_registry = er.async_get(self.hass)
+        entity_entry = entity_registry.async_get(entity_id)
+        identity_verified = False
+        rebound_entity_id: str | None = None
+        if stored_identity_digest:
+            if (
+                battery_entity_identity_digest(self.hass, entity_id)
+                == stored_identity_digest
+            ):
+                identity_verified = True
+            else:
+                rebound_entity_id = battery_entity_id_for_review_reference(
+                    self.hass,
+                    reference,
+                    stored_identity_digest,
+                )
+        else:
+            rebound_entity_id = battery_entity_id_for_review_reference(
+                self.hass,
+                reference,
+            )
+            if rebound_entity_id is None:
+                identity_verified = (
+                    stable_review_reference(battery_entity_key(self.hass, entity_id))
+                    == reference
+                )
+
+        if rebound_entity_id is not None:
+            entity_id = rebound_entity_id
+            review["entity_id"] = entity_id
+            entity_entry = entity_registry.async_get(entity_id)
+            identity_verified = True
+
+        if identity_verified and entity_entry is not None:
+            review["entity_identity_digest"] = battery_entity_identity_digest(
+                self.hass,
+                entity_id,
+            )
+
+        state = self.hass.states.get(entity_id) if identity_verified else None
+        resolved_title = (
+            battery_entity_metadata(
+                self.hass,
+                entity_id,
+            ).entity_display_name
+            if identity_verified
+            else entity_id
+        )
+        stored_title = str(review.get("display_title", "")).strip()
+        if resolved_title != entity_id:
+            entity_name = resolved_title
+            review["display_title"] = resolved_title
+        else:
+            entity_name = stored_title or resolved_title
         current_state = state.state if state else "unavailable"
         if (
             state
@@ -323,6 +392,34 @@ class BatteryMaintenanceCoordinator:
                 review.pop("pending_since", None)
                 active_by_id[pending_task_id] = pending_task
                 await self.store.async_save()
+
+        retirement_reason = self._review_retirement_reason(
+            entity_id,
+            entity_entry if identity_verified else None,
+            state,
+            identity_verified,
+        )
+        if retirement_reason is not None:
+            await self._async_retire_review(
+                reference,
+                review,
+                active_tasks,
+                active_by_id,
+                claimed_task_ids,
+                summary,
+                retirement_reason,
+            )
+            return
+
+        if entity_name == entity_id:
+            summary.review_unresolved += 1
+            _LOGGER.warning(
+                "Battery review %s has no device-specific title; no task was created "
+                "or updated for %s",
+                reference,
+                entity_id,
+            )
+            return
 
         task_id = int(review.get("task_id", 0))
         if task_id > 0:
@@ -397,6 +494,97 @@ class BatteryMaintenanceCoordinator:
         claimed_task_ids.add(created_id)
         await self.store.async_save()
         summary.review_created += 1
+
+    def _review_retirement_reason(
+        self,
+        entity_id: str,
+        entity_entry: er.RegistryEntry | None,
+        state: State | None,
+        identity_verified: bool,
+    ) -> str | None:
+        """Return why a battery review no longer needs operator action."""
+        replace_entities = set(self.entry.options.get(CONF_REPLACE_ENTITIES, []))
+        charge_entities = set(self.entry.options.get(CONF_CHARGE_ENTITIES, []))
+        if identity_verified and (
+            entity_id in replace_entities or entity_id in charge_entities
+        ):
+            return "categorized"
+
+        unknown_entities = set(self.entry.options.get(CONF_UNKNOWN_ENTITIES, []))
+        if entity_id in unknown_entities:
+            return None
+        if state is None:
+            return "ineligible" if entity_entry is None else None
+        if (
+            state.attributes.get(ATTR_DEVICE_CLASS) != "battery"
+            or state.attributes.get("unit_of_measurement") != PERCENTAGE
+        ):
+            return "ineligible"
+        return None
+
+    async def _async_retire_review(
+        self,
+        reference: str,
+        review: dict[str, Any],
+        active_tasks: list[dict[str, Any]],
+        active_by_id: dict[int, dict[str, Any]],
+        claimed_task_ids: set[int],
+        summary: ReconcileSummary,
+        reason: str,
+    ) -> None:
+        """Complete an owned stale review task and retain its suppression record."""
+        marker = review_reference_marker(reference)
+        try:
+            task = self._find_marker_candidate(
+                active_tasks,
+                marker,
+                claimed_task_ids,
+            )
+        except HomeAssistantError as err:
+            _LOGGER.error(
+                "Battery review %s cannot retire safely: %s",
+                reference,
+                err,
+            )
+            return
+
+        linked_task: dict[str, Any] | None = None
+        linked_task_id = int(review.get("task_id", 0))
+        if linked_task_id > 0 and linked_task_id not in claimed_task_ids:
+            candidate = active_by_id.get(linked_task_id)
+            if candidate and marker in str(candidate.get("description", "")):
+                linked_task = candidate
+
+        if task is not None and linked_task is not None:
+            if str(task.get("uid", "")) != str(linked_task.get("uid", "")):
+                _LOGGER.error(
+                    "Battery review %s cannot retire safely because its linked "
+                    "DoneTick task conflicts with another marker match",
+                    reference,
+                )
+                return
+        elif linked_task is not None:
+            task = linked_task
+
+        if task is not None:
+            task_id = parse_task_id(str(task.get("uid", "")))
+            if task_id is None:
+                _LOGGER.error(
+                    "Battery review %s cannot retire because its DoneTick task "
+                    "identifier is invalid",
+                    reference,
+                )
+                return
+            await self._async_complete_task(task_id)
+            claimed_task_ids.add(task_id)
+            active_by_id.pop(task_id, None)
+
+        review["retired_at"] = dt_util.now().isoformat()
+        review["retired_reason"] = reason
+        review["creation_pending"] = False
+        review.pop("pending_since", None)
+        summary.review_retired += 1
+        await self.store.async_save()
 
     @staticmethod
     def _pending_retry_due(record: dict[str, Any]) -> bool:

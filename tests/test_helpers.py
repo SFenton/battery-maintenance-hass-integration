@@ -11,6 +11,7 @@ from custom_components.battery_maintenance.helpers import (
     due_at_five,
     format_percent,
     parse_task_id,
+    review_task_name,
     stable_reference,
     task_description,
     task_name,
@@ -28,12 +29,18 @@ def test_task_copy_and_reference_are_stable() -> None:
         == "Replace Front Yard Battery \u00b7 13%"
     )
     assert (
-        task_name(ACTION_CHARGE, "Smart Lock", 19.5)
-        == "Charge Smart Lock \u00b7 19.5%"
+        task_name(ACTION_CHARGE, "Smart Lock", 19.5) == "Charge Smart Lock \u00b7 19.5%"
     )
     assert (
         task_name(ACTION_REPLACE, "Theater vent batteries", 8)
         == "Replace Theater vent Batteries \u00b7 8%"
+    )
+    assert (
+        task_name(ACTION_REPLACE, "Mustang Mach-E Battery (12V)", 18)
+        == "Replace Mustang Mach-E Battery (12V) \u00b7 18%"
+    )
+    assert review_task_name("Mustang Mach-E Battery (12V)") == (
+        "Mustang Mach-E Battery (12V)"
     )
     assert "13%" in task_description(
         ACTION_REPLACE,
