@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from hashlib import sha256
 from typing import Any
 
 from homeassistant.const import (
@@ -14,7 +15,7 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import CoreState, HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
@@ -34,6 +35,7 @@ from .const import (
     DONETICK_CREATE_SERVICE,
     DONETICK_DOMAIN,
     DONETICK_UPDATE_SERVICE,
+    ORPHAN_GRACE_SECONDS,
     PENDING_RETRY_SECONDS,
     REVIEW_ASSIGNEE_ID,
     TASK_REFRESH_DELAY,
@@ -41,6 +43,7 @@ from .const import (
 )
 from .entity import (
     BatteryEntityMetadata,
+    _battery_entity_key_from_entry,
     battery_entity_id_for_review_reference,
     battery_entity_identity_digest,
     battery_entity_key,
@@ -81,6 +84,7 @@ class ReconcileSummary:
     review_created: int = 0
     review_retired: int = 0
     review_unresolved: int = 0
+    orphans_removed: int = 0
     review_updated: int = 0
     errors: int = 0
 
@@ -155,7 +159,13 @@ class BatteryMaintenanceCoordinator:
             }
             claimed_task_ids: set[int] = set()
 
-            errors: list[str] = []
+            errors: list[str] = await self._async_remove_orphans(
+                active_tasks,
+                active_by_id,
+                claimed_task_ids,
+                summary,
+            )
+            summary.errors += len(errors)
             for reference, review in list(self.store.reviews.items()):
                 try:
                     await self._async_reconcile_review(
@@ -203,6 +213,247 @@ class BatteryMaintenanceCoordinator:
                     "log for details"
                 )
             return summary
+
+    def _entity_is_present(self, entity_id: str) -> bool:
+        """Return whether an entity is in the registry or the state machine."""
+        return (
+            er.async_get(self.hass).async_get(entity_id) is not None
+            or self.hass.states.get(entity_id) is not None
+        )
+
+    def _review_rebind_target(
+        self, reference: str, review: dict[str, Any]
+    ) -> str | None:
+        """Return the entity a review's stored identity now resolves to."""
+        digest = str(review.get("entity_identity_digest", "")).strip()
+        try:
+            return battery_entity_id_for_review_reference(
+                self.hass,
+                reference,
+                digest or None,
+            )
+        except HomeAssistantError:
+            # Ambiguous identity: never treat as an orphan.
+            return str(review.get("entity_id", ""))
+
+    def _listed_rebind_target(self, entity_id: str, listed: set[str]) -> str | None:
+        """Find the present sensor an absent listed entity was renamed to.
+
+        Matches the identity digest recorded while the entity existed, or the
+        physical device key stored on its open-episode ledger entry. Returns the
+        entity itself when the match is ambiguous so it is never orphaned.
+        """
+        matches: set[str] = set()
+        digest = self.store.identities.get(entity_id)
+        if digest:
+            for entry in er.async_get(self.hass).entities.values():
+                if (
+                    entry.entity_id.startswith("sensor.")
+                    and entry.entity_id != entity_id
+                    and sha256(
+                        _battery_entity_key_from_entry(entry).encode()
+                    ).hexdigest()
+                    == digest
+                ):
+                    matches.add(entry.entity_id)
+        keys = {
+            str(ledger["physical_key"])
+            for ledger in self.store.entries.values()
+            if ledger.get("entity_id") == entity_id and ledger.get("physical_key")
+        }
+        if keys:
+            for candidate in self._battery_entities():
+                if (
+                    candidate != entity_id
+                    and candidate not in listed
+                    and battery_entity_metadata(self.hass, candidate).physical_key
+                    in keys
+                ):
+                    matches.add(candidate)
+        if len(matches) > 1:
+            return entity_id
+        return next(iter(matches), None)
+
+    async def _async_remove_orphans(
+        self,
+        active_tasks: list[dict[str, Any]],
+        active_by_id: dict[int, dict[str, Any]],
+        claimed_task_ids: set[int],
+        summary: ReconcileSummary,
+    ) -> list[str]:
+        """Remove entities deleted from Home Assistant and their DoneTick tasks.
+
+        An entity is an orphan when it is absent from the entity registry and
+        the state machine and its stored identity cannot be rebound to another
+        entity. It must be seen absent on two reconciles at least
+        ``ORPHAN_GRACE_SECONDS`` apart, so a slow startup or a restart never
+        orphans a live sensor. Orphans have their DoneTick task completed (the
+        same ``donetick.complete_task`` call used for recovery), their review
+        and ledger records dropped, and are removed from the option lists.
+        """
+        if self.hass.state is not CoreState.running:
+            # Entities may not have loaded yet (before EVENT_HOMEASSISTANT_STARTED).
+            return []
+        options = self.entry.options
+        listed = {
+            *options.get(CONF_REPLACE_ENTITIES, []),
+            *options.get(CONF_CHARGE_ENTITIES, []),
+            *options.get(CONF_UNKNOWN_ENTITIES, []),
+        }
+        reviews_by_entity: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        for reference, review in self.store.reviews.items():
+            for owned_id in (
+                str(review.get("entity_id", "")),
+                *map(str, review.get("previous_entity_ids", [])),
+            ):
+                reviews_by_entity.setdefault(owned_id, []).append((reference, review))
+
+        changed = False
+        for entity_id in sorted(listed):
+            if self._entity_is_present(entity_id):
+                digest = battery_entity_identity_digest(self.hass, entity_id)
+                if self.store.identities.get(entity_id) != digest:
+                    self.store.identities[entity_id] = digest
+                    changed = True
+
+        absent: set[str] = set()
+        renames: dict[str, str] = {}
+        for entity_id in sorted({*listed, *reviews_by_entity}):
+            if not entity_id or self._entity_is_present(entity_id):
+                continue
+            target = self._listed_rebind_target(entity_id, listed)
+            if target is not None:
+                if target != entity_id and target not in listed:
+                    renames[entity_id] = target
+                continue
+            related = reviews_by_entity.get(entity_id, [])
+            if any(
+                self._review_rebind_target(reference, review) is not None
+                for reference, review in related
+            ):
+                continue
+            absent.add(entity_id)
+
+        for entity_id in list(self.store.missing):
+            if entity_id not in absent:
+                del self.store.missing[entity_id]
+                changed = True
+
+        now = dt_util.now()
+        errors: list[str] = []
+        orphans: set[str] = set()
+        for entity_id in sorted(absent):
+            since = dt_util.parse_datetime(self.store.missing.get(entity_id, ""))
+            if since is None:
+                self.store.missing[entity_id] = now.isoformat()
+                changed = True
+                _LOGGER.debug("Battery entity %s is absent; grace started", entity_id)
+                continue
+            if (now - since).total_seconds() < ORPHAN_GRACE_SECONDS:
+                continue
+            try:
+                await self._async_remove_orphan(
+                    entity_id,
+                    reviews_by_entity.get(entity_id, []),
+                    active_tasks,
+                    active_by_id,
+                    claimed_task_ids,
+                    summary,
+                )
+            except HomeAssistantError as err:
+                errors.append(f"{entity_id}: {err}")
+                _LOGGER.error(
+                    "Could not remove orphaned battery %s: %s", entity_id, err
+                )
+                continue
+            orphans.add(entity_id)
+            del self.store.missing[entity_id]
+
+        if orphans or renames:
+            # Built at write time so an options-flow save made while DoneTick
+            # was being called is not overwritten.
+            new_options = dict(self.entry.options)
+            for key in (
+                CONF_REPLACE_ENTITIES,
+                CONF_CHARGE_ENTITIES,
+                CONF_UNKNOWN_ENTITIES,
+            ):
+                if key in new_options:
+                    new_options[key] = [
+                        renames.get(item, item)
+                        for item in new_options[key]
+                        if item not in orphans
+                    ]
+            self.hass.config_entries.async_update_entry(self.entry, options=new_options)
+            summary.orphans_removed += len(orphans)
+            for old, new in renames.items():
+                _LOGGER.info("Battery entity %s was renamed to %s", old, new)
+                self.store.identities.pop(old, None)
+                self.store.missing.pop(old, None)
+                for ledger in self.store.entries.values():
+                    if ledger.get("entity_id") == old:
+                        ledger["entity_id"] = new
+            for entity_id in orphans:
+                self.store.identities.pop(entity_id, None)
+        if changed or orphans or renames:
+            await self.store.async_save()
+        return errors
+
+    async def _async_remove_orphan(
+        self,
+        entity_id: str,
+        reviews: list[tuple[str, dict[str, Any]]],
+        active_tasks: list[dict[str, Any]],
+        active_by_id: dict[int, dict[str, Any]],
+        claimed_task_ids: set[int],
+        summary: ReconcileSummary,
+    ) -> None:
+        """Close the DoneTick tasks of one orphaned entity and drop its records."""
+        for reference, review in reviews:
+            if not await self._async_retire_review(
+                reference,
+                review,
+                active_tasks,
+                active_by_id,
+                claimed_task_ids,
+                summary,
+                "orphaned",
+                drop=True,
+            ):
+                raise HomeAssistantError(
+                    f"review {reference} could not be closed safely"
+                )
+            _LOGGER.info(
+                "Removed orphaned battery review %s for deleted entity %s",
+                reference,
+                entity_id,
+            )
+        for reference, ledger in list(self.store.entries.items()):
+            if ledger.get("entity_id") != entity_id:
+                continue
+            task_id = int(ledger.get("task_id", 0))
+            task = active_by_id.get(task_id)
+            if task is not None and reference_marker(reference) in str(
+                task.get("description", "")
+            ):
+                await self._async_complete_task(task_id)
+                claimed_task_ids.add(task_id)
+                active_by_id.pop(task_id, None)
+            elif task is not None:
+                _LOGGER.warning(
+                    "DoneTick task %s for deleted battery %s lacks reference %s; "
+                    "it was left open and unlinked",
+                    task_id,
+                    entity_id,
+                    reference,
+                )
+            self.store.entries.pop(reference, None)
+            _LOGGER.info(
+                "Removed orphaned battery task %s for deleted entity %s",
+                reference,
+                entity_id,
+            )
+        _LOGGER.info("Removed deleted battery entity %s from options", entity_id)
 
     def _battery_entities(self) -> list[str]:
         """Return enabled percentage battery sensor entities."""
@@ -321,6 +572,10 @@ class BatteryMaintenanceCoordinator:
                 )
 
         if rebound_entity_id is not None:
+            if rebound_entity_id != entity_id:
+                previous = review.setdefault("previous_entity_ids", [])
+                if entity_id not in previous:
+                    previous.append(entity_id)
             entity_id = rebound_entity_id
             review["entity_id"] = entity_id
             entity_entry = entity_registry.async_get(entity_id)
@@ -531,8 +786,14 @@ class BatteryMaintenanceCoordinator:
         claimed_task_ids: set[int],
         summary: ReconcileSummary,
         reason: str,
-    ) -> None:
-        """Complete an owned stale review task and retain its suppression record."""
+        *,
+        drop: bool = False,
+    ) -> bool:
+        """Complete an owned stale review task and retain its suppression record.
+
+        With ``drop`` the review is deleted from the store instead (orphans).
+        Returns whether the review was retired or dropped.
+        """
         marker = review_reference_marker(reference)
         try:
             task = self._find_marker_candidate(
@@ -546,7 +807,7 @@ class BatteryMaintenanceCoordinator:
                 reference,
                 err,
             )
-            return
+            return False
 
         linked_task: dict[str, Any] | None = None
         linked_task_id = int(review.get("task_id", 0))
@@ -562,7 +823,7 @@ class BatteryMaintenanceCoordinator:
                     "DoneTick task conflicts with another marker match",
                     reference,
                 )
-                return
+                return False
         elif linked_task is not None:
             task = linked_task
 
@@ -574,17 +835,21 @@ class BatteryMaintenanceCoordinator:
                     "identifier is invalid",
                     reference,
                 )
-                return
+                return False
             await self._async_complete_task(task_id)
             claimed_task_ids.add(task_id)
             active_by_id.pop(task_id, None)
 
-        review["retired_at"] = dt_util.now().isoformat()
-        review["retired_reason"] = reason
-        review["creation_pending"] = False
-        review.pop("pending_since", None)
-        summary.review_retired += 1
+        if drop:
+            self.store.reviews.pop(reference, None)
+        else:
+            review["retired_at"] = dt_util.now().isoformat()
+            review["retired_reason"] = reason
+            review["creation_pending"] = False
+            review.pop("pending_since", None)
+            summary.review_retired += 1
         await self.store.async_save()
+        return True
 
     @staticmethod
     def _pending_retry_due(record: dict[str, Any]) -> bool:
