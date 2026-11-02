@@ -7,7 +7,12 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.const import PERCENTAGE
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import (
+    CoreState,
+    HomeAssistant,
+    ServiceCall,
+    SupportsResponse,
+)
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -44,6 +49,7 @@ class Harness:
         tasks: list[dict[str, Any]],
     ) -> None:
         self.hass = hass
+        hass.set_state(CoreState.running)
         self.tasks = tasks
         self.completed: list[int] = []
         self.entry = MockConfigEntry(
@@ -296,3 +302,156 @@ async def test_grace_survives_restart(hass: HomeAssistant) -> None:
     reloaded = BatteryMaintenanceStore(hass, harness.entry.entry_id, "donetick-entry")
     await reloaded.async_load()
     assert GONE in reloaded.missing
+
+
+def _mqtt_sensor(
+    hass: HomeAssistant, unique_id: str, object_id: str
+) -> er.RegistryEntry:
+    source = MockConfigEntry(domain="mqtt", data={}, entry_id=f"mqtt-{unique_id}")
+    source.add_to_hass(hass)
+    entry = er.async_get(hass).async_get_or_create(
+        "sensor",
+        "mqtt",
+        unique_id,
+        config_entry=source,
+        original_name="Door Battery",
+        suggested_object_id=object_id,
+    )
+    hass.states.async_set(
+        entry.entity_id,
+        "50",
+        {
+            "device_class": SensorDeviceClass.BATTERY,
+            "friendly_name": "Door Battery",
+            "unit_of_measurement": PERCENTAGE,
+        },
+    )
+    return entry
+
+
+async def test_renamed_mapped_sensor_is_rebound_by_identity(
+    hass: HomeAssistant,
+) -> None:
+    """A Replace sensor without a review follows a registry rename."""
+    entry = _mqtt_sensor(hass, "door", "door_battery")
+    harness = Harness(hass, {CONF_REPLACE_ENTITIES: [entry.entity_id]}, [])
+    await harness.coordinator.async_reconcile("seen")
+    assert entry.entity_id in harness.store.identities
+
+    new_id = "sensor.front_door_battery"
+    er.async_get(hass).async_update_entity(entry.entity_id, new_entity_id=new_id)
+    hass.states.async_remove(entry.entity_id)
+    hass.states.async_set(
+        new_id,
+        "50",
+        {"device_class": SensorDeviceClass.BATTERY, "unit_of_measurement": PERCENTAGE},
+    )
+    for reason in ("renamed", "later"):
+        harness.age_missing()
+        await harness.coordinator.async_reconcile(reason)
+
+    assert harness.completed == []
+    assert harness.store.missing == {}
+    assert harness.entry.options[CONF_REPLACE_ENTITIES] == [new_id]
+
+
+async def test_renamed_sensor_is_rebound_by_ledger_physical_key(
+    hass: HomeAssistant,
+) -> None:
+    """The ledger's physical key finds the sensor when no identity was stored."""
+    entry = _mqtt_sensor(hass, "door2", "new_door_battery")
+    state = hass.states.get(entry.entity_id)
+    hass.states.async_set(entry.entity_id, "unknown", state.attributes)
+    reference = "BATT-9999"
+    old_id = "sensor.old_door_battery"
+    harness = Harness(
+        hass,
+        {CONF_CHARGE_ENTITIES: [old_id]},
+        [
+            {
+                "description": f"Low.\n\nMaintenance reference: {reference}.",
+                "status": "needs_action",
+                "summary": "Charge",
+                "uid": "800--2026-11-02 00:00:00+00:00",
+            }
+        ],
+    )
+    harness.store.entries[reference] = {
+        "entity_id": old_id,
+        "physical_key": "entity:mqtt:door2",
+        "task_id": 800,
+    }
+    for reason in ("first", "second"):
+        harness.age_missing()
+        await harness.coordinator.async_reconcile(reason)
+
+    assert harness.completed == []
+    assert harness.entry.options[CONF_CHARGE_ENTITIES] == [entry.entity_id]
+    assert harness.store.entries[reference]["entity_id"] == entry.entity_id
+
+
+async def test_options_saved_during_donetick_call_are_preserved(
+    hass: HomeAssistant,
+) -> None:
+    """Options changed while a task is being completed are not overwritten."""
+    harness, _ = orphan_harness(hass)
+    await harness.coordinator.async_reconcile("first")
+    harness.age_missing()
+
+    async def complete_and_edit(call: ServiceCall) -> None:
+        harness.completed.append(int(call.data["task_id"]))
+        harness.tasks.clear()
+        hass.config_entries.async_update_entry(
+            harness.entry,
+            options={
+                **harness.entry.options,
+                CONF_REPLACE_ENTITIES: ["sensor.added_by_user"],
+            },
+        )
+
+    hass.services.async_remove("donetick", "complete_task")
+    hass.services.async_register("donetick", "complete_task", complete_and_edit)
+    await harness.coordinator.async_reconcile("second")
+
+    assert harness.completed == [639]
+    assert harness.entry.options[CONF_REPLACE_ENTITIES] == ["sensor.added_by_user"]
+    assert GONE not in harness.entry.options[CONF_UNKNOWN_ENTITIES]
+
+
+async def test_markerless_ledger_task_warns_and_is_not_completed(
+    hass: HomeAssistant, caplog
+) -> None:
+    """A foreign task is left open, with a warning naming it."""
+    harness = Harness(
+        hass,
+        {CONF_REPLACE_ENTITIES: [GONE]},
+        [
+            {
+                "description": "Someone else's task",
+                "status": "needs_action",
+                "summary": "Other",
+                "uid": "641--2026-11-02 00:00:00+00:00",
+            }
+        ],
+    )
+    harness.store.entries["BATT-1"] = {"entity_id": GONE, "task_id": 641}
+    await harness.coordinator.async_reconcile("first")
+    harness.age_missing()
+    await harness.coordinator.async_reconcile("second")
+
+    assert harness.completed == []
+    assert harness.store.entries == {}
+    assert "DoneTick task 641" in caplog.text
+
+
+async def test_no_orphan_detection_before_startup(hass: HomeAssistant) -> None:
+    """Nothing is recorded or removed until Home Assistant is running."""
+    harness, reference = orphan_harness(hass)
+    hass.set_state(CoreState.starting)
+    await harness.coordinator.async_reconcile("boot")
+    harness.age_missing()
+    await harness.coordinator.async_reconcile("boot again")
+
+    assert harness.completed == []
+    assert harness.store.missing == {}
+    assert reference in harness.store.reviews

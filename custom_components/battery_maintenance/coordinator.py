@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from hashlib import sha256
 from typing import Any
 
 from homeassistant.const import (
@@ -14,7 +15,7 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import CoreState, HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
@@ -42,6 +43,7 @@ from .const import (
 )
 from .entity import (
     BatteryEntityMetadata,
+    _battery_entity_key_from_entry,
     battery_entity_id_for_review_reference,
     battery_entity_identity_digest,
     battery_entity_key,
@@ -234,6 +236,44 @@ class BatteryMaintenanceCoordinator:
             # Ambiguous identity: never treat as an orphan.
             return str(review.get("entity_id", ""))
 
+    def _listed_rebind_target(self, entity_id: str, listed: set[str]) -> str | None:
+        """Find the present sensor an absent listed entity was renamed to.
+
+        Matches the identity digest recorded while the entity existed, or the
+        physical device key stored on its open-episode ledger entry. Returns the
+        entity itself when the match is ambiguous so it is never orphaned.
+        """
+        matches: set[str] = set()
+        digest = self.store.identities.get(entity_id)
+        if digest:
+            for entry in er.async_get(self.hass).entities.values():
+                if (
+                    entry.entity_id.startswith("sensor.")
+                    and entry.entity_id != entity_id
+                    and sha256(
+                        _battery_entity_key_from_entry(entry).encode()
+                    ).hexdigest()
+                    == digest
+                ):
+                    matches.add(entry.entity_id)
+        keys = {
+            str(ledger["physical_key"])
+            for ledger in self.store.entries.values()
+            if ledger.get("entity_id") == entity_id and ledger.get("physical_key")
+        }
+        if keys:
+            for candidate in self._battery_entities():
+                if (
+                    candidate != entity_id
+                    and candidate not in listed
+                    and battery_entity_metadata(self.hass, candidate).physical_key
+                    in keys
+                ):
+                    matches.add(candidate)
+        if len(matches) > 1:
+            return entity_id
+        return next(iter(matches), None)
+
     async def _async_remove_orphans(
         self,
         active_tasks: list[dict[str, Any]],
@@ -251,6 +291,9 @@ class BatteryMaintenanceCoordinator:
         same ``donetick.complete_task`` call used for recovery), their review
         and ledger records dropped, and are removed from the option lists.
         """
+        if self.hass.state is not CoreState.running:
+            # Entities may not have loaded yet (before EVENT_HOMEASSISTANT_STARTED).
+            return []
         options = self.entry.options
         listed = {
             *options.get(CONF_REPLACE_ENTITIES, []),
@@ -265,9 +308,23 @@ class BatteryMaintenanceCoordinator:
             ):
                 reviews_by_entity.setdefault(owned_id, []).append((reference, review))
 
+        changed = False
+        for entity_id in sorted(listed):
+            if self._entity_is_present(entity_id):
+                digest = battery_entity_identity_digest(self.hass, entity_id)
+                if self.store.identities.get(entity_id) != digest:
+                    self.store.identities[entity_id] = digest
+                    changed = True
+
         absent: set[str] = set()
+        renames: dict[str, str] = {}
         for entity_id in sorted({*listed, *reviews_by_entity}):
             if not entity_id or self._entity_is_present(entity_id):
+                continue
+            target = self._listed_rebind_target(entity_id, listed)
+            if target is not None:
+                if target != entity_id and target not in listed:
+                    renames[entity_id] = target
                 continue
             related = reviews_by_entity.get(entity_id, [])
             if any(
@@ -277,7 +334,6 @@ class BatteryMaintenanceCoordinator:
                 continue
             absent.add(entity_id)
 
-        changed = False
         for entity_id in list(self.store.missing):
             if entity_id not in absent:
                 del self.store.missing[entity_id]
@@ -313,8 +369,10 @@ class BatteryMaintenanceCoordinator:
             orphans.add(entity_id)
             del self.store.missing[entity_id]
 
-        if orphans:
-            new_options = dict(options)
+        if orphans or renames:
+            # Built at write time so an options-flow save made while DoneTick
+            # was being called is not overwritten.
+            new_options = dict(self.entry.options)
             for key in (
                 CONF_REPLACE_ENTITIES,
                 CONF_CHARGE_ENTITIES,
@@ -322,11 +380,22 @@ class BatteryMaintenanceCoordinator:
             ):
                 if key in new_options:
                     new_options[key] = [
-                        item for item in new_options[key] if item not in orphans
+                        renames.get(item, item)
+                        for item in new_options[key]
+                        if item not in orphans
                     ]
             self.hass.config_entries.async_update_entry(self.entry, options=new_options)
             summary.orphans_removed += len(orphans)
-        if changed or orphans:
+            for old, new in renames.items():
+                _LOGGER.info("Battery entity %s was renamed to %s", old, new)
+                self.store.identities.pop(old, None)
+                self.store.missing.pop(old, None)
+                for ledger in self.store.entries.values():
+                    if ledger.get("entity_id") == old:
+                        ledger["entity_id"] = new
+            for entity_id in orphans:
+                self.store.identities.pop(entity_id, None)
+        if changed or orphans or renames:
             await self.store.async_save()
         return errors
 
@@ -370,6 +439,14 @@ class BatteryMaintenanceCoordinator:
                 await self._async_complete_task(task_id)
                 claimed_task_ids.add(task_id)
                 active_by_id.pop(task_id, None)
+            elif task is not None:
+                _LOGGER.warning(
+                    "DoneTick task %s for deleted battery %s lacks reference %s; "
+                    "it was left open and unlinked",
+                    task_id,
+                    entity_id,
+                    reference,
+                )
             self.store.entries.pop(reference, None)
             _LOGGER.info(
                 "Removed orphaned battery task %s for deleted entity %s",
