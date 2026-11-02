@@ -31,6 +31,8 @@ class BatteryMaintenanceStore:
         )
         self.entries: dict[str, dict[str, Any]] = {}
         self.reviews: dict[str, dict[str, Any]] = {}
+        # entity_id -> ISO time the entity was first seen absent (orphan grace).
+        self.missing: dict[str, str] = {}
 
     async def async_load(self) -> None:
         """Load persisted ledger state."""
@@ -41,6 +43,7 @@ class BatteryMaintenanceStore:
         ):
             self.entries = {}
             self.reviews = {}
+            self.missing = {}
             await self.async_save()
             return
         entries = data.get("entries", {}) if isinstance(data, dict) else {}
@@ -55,6 +58,12 @@ class BatteryMaintenanceStore:
             for reference, value in reviews.items()
             if isinstance(value, dict)
         }
+        missing = data.get("missing", {}) if isinstance(data, dict) else {}
+        self.missing = (
+            {str(entity_id): str(since) for entity_id, since in missing.items()}
+            if isinstance(missing, dict)
+            else {}
+        )
 
     async def async_save(self) -> None:
         """Persist the current ledger state immediately."""
@@ -63,6 +72,7 @@ class BatteryMaintenanceStore:
                 "donetick_entry_id": self.donetick_entry_id,
                 "entries": self.entries,
                 "reviews": self.reviews,
+                "missing": self.missing,
             }
         )
 
@@ -76,4 +86,5 @@ class BatteryMaintenanceStore:
             "donetick_entry_id": self.donetick_entry_id,
             "entries": {key: dict(value) for key, value in self.entries.items()},
             "reviews": {key: dict(value) for key, value in self.reviews.items()},
+            "missing": dict(self.missing),
         }

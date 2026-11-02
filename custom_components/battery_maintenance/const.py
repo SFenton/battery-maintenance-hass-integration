@@ -37,6 +37,9 @@ STORE_SAVE_DELAY: Final = 1
 
 TASK_DUE_HOUR: Final = 17
 PENDING_RETRY_SECONDS: Final = 30 * 60
+# An entity must stay absent from both the entity registry and the state machine
+# for at least this long, across at least two reconciles, before it is orphaned.
+ORPHAN_GRACE_SECONDS: Final = 60 * 60
 TASK_REFRESH_DELAY: Final = 1.0
 TASK_REFRESH_TIMEOUT: Final = 15.0
 REFERENCE_PREFIX: Final = "BATT-"

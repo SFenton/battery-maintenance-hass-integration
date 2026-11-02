@@ -65,6 +65,18 @@ matching integration-owned DoneTick task is completed and the retained review
 record prevents rediscovery. Categorization instructions remain in the task
 description.
 
+### Deleted entities (0.3.4)
+
+When a battery entity is deleted from Home Assistant, it is absent from both
+the entity registry and the state machine, and its stored identity cannot be
+rebound to a renamed entity, it is treated as an orphan. An unavailable entity
+that is still registered is never an orphan. Absence must be observed on two
+reconciles at least one hour apart (persisted, so restarts do not reset or
+shortcut it). The orphan's DoneTick task is then completed with
+`donetick.complete_task`, its review and open-episode records are dropped, and
+it is removed from the Replace, Charge and Unknown lists. Each removal is
+logged at info level.
+
 Managed task titles use the Home Assistant device name. Keep those names
 household-facing and functional, such as `Front Yard Faucet` rather than only
 `Front Yard`, so task and notification surfaces identify the device clearly.
